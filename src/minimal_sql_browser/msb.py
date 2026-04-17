@@ -3,12 +3,147 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QTextEdit, QTableView, QComboBox,
                              QLabel, QSplitter, QSizePolicy, QFileDialog, QAction, QShortcut, QProgressDialog)
 from PyQt5.QtSql import QSqlDatabase, QSqlQuery, QSqlQueryModel
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
-from PyQt5.QtGui import QFont
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QStringListModel
+from PyQt5.QtGui import QFont, QColor, QSyntaxHighlighter
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import os
 import re
+
+from PyQt5.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont
+from PyQt5.QtCore import QRegExp
+
+from PyQt5.QtWidgets import QApplication, QPlainTextEdit, QCompleter
+from PyQt5.QtCore import Qt
+import sys
+
+keywords = [
+    "add", "all", "alter", "and", "any", "as", "asc",
+    "backup", "between", "by"
+    "case", "check", "column", "commit", "constraint", "create",
+    "database", "default", "delete", "desc", "distinct", "drop",
+    "exists",
+    "from", "full",
+    "group",
+    "having",
+    "in", "index", "inner", "insert", "is", "into",
+    "join",
+    "left", "like", "limit",
+    "not", "null",
+    "on", "or", "order", "outer",
+    "primary", "procedure",
+    "reindex", "replace", "rollback",
+    "rownum", "savepoint", "select", "set",
+    "table", "top", "truncate",
+    "union", "unique", "update", "using",
+    "values", "vacuum", "view",
+    "when", "where"
+]
+
+class Editor(QPlainTextEdit):
+    def __init__(self):
+        super().__init__()
+        self.model = QStringListModel(keywords)
+        self.completer = QCompleter(self.model, self)
+        self.completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.completer.setWidget(self)
+        self.completer.setCompletionMode(QCompleter.PopupCompletion)
+        self.completer.activated.connect(self.insert_completion)
+
+    def set_db_keywords(self, new_keywords):
+        self.model.setStringList(keywords + new_keywords)
+
+
+
+    def keyPressEvent(self, event):
+        if self.completer.popup().isVisible():
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab):
+                event.ignore()
+                return
+
+        super().keyPressEvent(event)
+
+        prefix = self.text_under_cursor()
+        if len(prefix) < 2 or self.text_under_cursor() == self.completer.popup().currentIndex().data():
+            self.completer.popup().hide()
+            return
+
+        if prefix != self.completer.completionPrefix():
+            self.completer.setCompletionPrefix(prefix)
+            self.completer.popup().setCurrentIndex(
+                self.completer.completionModel().index(0, 0)
+            )
+
+        cr = self.cursorRect()
+        cr.setWidth(self.completer.popup().sizeHintForColumn(0))
+        self.completer.complete(cr)
+
+    def insert_completion(self, completion):
+        tc = self.textCursor()
+        extra = len(completion) - len(self.completer.completionPrefix())
+        tc.movePosition(tc.Left)
+        tc.movePosition(tc.EndOfWord)
+        if completion != self.completer.completionPrefix():
+            tc.insertText(completion[-extra:])
+        tc.insertText(" ")
+        self.setTextCursor(tc)
+
+    def text_under_cursor(self):
+        tc = self.textCursor()
+        tc.select(tc.WordUnderCursor)
+        return tc.selectedText()
+
+
+class SQLHighlighter(QSyntaxHighlighter):
+    def __init__(self, document):
+        super().__init__(document)
+        self.rules = []
+        self.set_keywords([])
+
+    def reset(self):
+        self.rules = []
+        self.set_keywords([])
+
+    def set_keywords(self, new_keywords):
+        # Keyword format
+        keyword_format = QTextCharFormat()
+        keyword_format.setForeground(QColor("blue"))
+        keyword_format.setFontWeight(QFont.Bold)
+
+        for word in keywords + new_keywords:
+            pattern = QRegExp(f"\\b{word}\\b")
+            pattern.setCaseSensitivity(Qt.CaseInsensitive)
+            self.rules.append((pattern, keyword_format))
+
+        # String format
+        string_format = QTextCharFormat()
+        string_format.setForeground(QColor("magenta"))
+        self.rules.append((QRegExp("\".*\""), string_format))
+
+        # Comment format
+        comment_format = QTextCharFormat()
+        comment_format.setForeground(QColor("green"))
+        self.rules.append((QRegExp("#[^\n]*"), comment_format))
+
+    def add_keywords(self, words, color):
+        fmt = QTextCharFormat()
+        fmt.setForeground(color)
+        for word in words:
+            pattern = QRegExp(f"\\b{word}\\b")
+            pattern.setCaseSensitivity(Qt.CaseInsensitive)
+            self.rules.append((pattern, fmt))
+        self.rehighlight()
+
+    def highlightBlock(self, text):
+        for pattern, fmt in self.rules:
+            expression = QRegExp(pattern)
+            index = expression.indexIn(text)
+
+            while index >= 0:
+                length = expression.matchedLength()
+                self.setFormat(index, length, fmt)
+                index = expression.indexIn(text, index + length)
+
 
 class DbChangeHandler(FileSystemEventHandler):
     """Watchdog handler that emits a Qt signal when the watched DB file is modified."""
@@ -29,6 +164,7 @@ class MiniSqlApp(QWidget):
 
     def __init__(self):
         super().__init__()
+        self.state = 0
         self.counter = 0
 
 
@@ -45,13 +181,12 @@ class MiniSqlApp(QWidget):
         self.top_widget = QWidget()
         top_layout = QVBoxLayout(self.top_widget)
 
-        qlbl = QLabel("Query Editor (Ctrl+Enter):")
+        qlbl = QLabel("Query Editor (Ctrl+Enter)")
         qlbl.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
 
-
-
-        self.query_input = QTextEdit()
+        self.query_input = Editor()
         self.query_input.setMinimumHeight(150)
+        self.highlighter = SQLHighlighter(self.query_input.document())
 
         self.info_output = QTextEdit()
         self.info_output.setReadOnly(True)
@@ -70,20 +205,20 @@ class MiniSqlApp(QWidget):
         table_splitter = QSplitter(Qt.Horizontal)
 
         # Left: Result
-        self.res_w = QWidget()
-        res_l = QVBoxLayout(self.res_w)
+        self.results_w = QWidget()
+        res_l = QVBoxLayout(self.results_w)
         self.query_view = QTableView()
         self.query_view.verticalHeader().setVisible(False)
         self.query_model = QSqlQueryModel()
         self.query_view.setModel(self.query_model)
-        query_res = QLabel("Query Result:")
+        query_res = QLabel("Query Result")
         res_l.addWidget(query_res)
         res_l.addWidget(self.query_view)
-        table_splitter.addWidget(self.res_w)
+        table_splitter.addWidget(self.results_w)
 
         # Right: Watcher
-        wat_w = QWidget()
-        wat_l = QVBoxLayout(wat_w)
+        self.watcher_w = QWidget()
+        wat_l = QVBoxLayout(self.watcher_w)
         self.table_selector = QComboBox()
         self.table_selector.currentTextChanged.connect(self.refresh_full_view)
         self.full_view = QTableView()
@@ -91,11 +226,11 @@ class MiniSqlApp(QWidget):
 
         self.full_model = QSqlQueryModel()
         self.full_view.setModel(self.full_model)
-        table_w_lbl = QLabel("Table Watcher:")
+        table_w_lbl = QLabel("Table Watcher")
         wat_l.addWidget(table_w_lbl)
         wat_l.addWidget(self.table_selector)
         wat_l.addWidget(self.full_view)
-        table_splitter.addWidget(wat_w)
+        table_splitter.addWidget(self.watcher_w)
 
         main_splitter.addWidget(table_splitter)
         main_splitter.setStretchFactor(0, 1)
@@ -112,15 +247,30 @@ class MiniSqlApp(QWidget):
         q = QShortcut("Ctrl+B", self)
         q.activated.connect(self.loop_views)
 
-        self.fontable = [qlbl, self.query_input,
+        self.fontable = [qlbl, self.query_input, self.info_output,
                          self.table_selector, self.full_view,
                          self.query_view, op_info, query_res, table_w_lbl]
 
         self.set_font_size(14)
 
     def loop_views(self):
-        self.res_w.setVisible(not self.res_w.isVisible())
-        self.top_widget.setVisible(not self.top_widget.isVisible())
+        self.state = (self.state + 1) % 4
+        if self.state == 0:
+            self.results_w.setVisible(True)
+            self.top_widget.setVisible(True)
+            self.watcher_w.setVisible(True)
+        elif self.state == 1:
+            self.results_w.setVisible(False)
+            self.top_widget.setVisible(False)
+            self.watcher_w.setVisible(True)
+        elif self.state == 2:
+            self.results_w.setVisible(True)
+            self.watcher_w.setVisible(False)
+            self.top_widget.setVisible(True)
+        elif self.state == 3:
+            self.results_w.setVisible(False)
+            self.watcher_w.setVisible(True)
+            self.top_widget.setVisible(True)
 
 
     # ------------------------------------------------------------------
@@ -156,8 +306,17 @@ class MiniSqlApp(QWidget):
         else:
             super().keyPressEvent(event)
 
+    def insert_result(self, text, color=Qt.black):
+        self.counter += 1
+        cursor = self.info_output.textCursor()
+        cursor.movePosition(cursor.Start)
+        fmt = cursor.charFormat()
+        fmt.setForeground(color)
+        cursor.setCharFormat(fmt)
+        cursor.insertText(f"[{self.counter}] {text}\n")
+        self.info_output.setTextCursor(cursor)
+
     def run_query(self):
-        self.counter = self.counter + 1
         sql = self.query_input.toPlainText()
         query = QSqlQuery()
         if query.exec_(sql):
@@ -168,20 +327,18 @@ class MiniSqlApp(QWidget):
                 affected = query.numRowsAffected()
                 msg = f"Success. Rows affected: {affected}"
                 if affected > 0:
-                    self.info_output.setHtml(f"<span style='font-size: 10pt;color: #2e7d32;'>[{self.counter}] {msg}</span>" + self.info_output.toHtml())
+                    self.insert_result(msg, color=Qt.darkGreen)
                 else:
                     # orange
-                    self.info_output.setHtml(f"<span style='font-size: 10pt;color: #FFa000;'>[{self.counter}] {msg}</span>" + self.info_output.toHtml())
+                    self.insert_result(msg, color=QColor(255, 140, 0))
             else:
                 def delayed(pd=None):
                     while self.query_model.canFetchMore():
                         self.query_model.fetchMore()
 
                     # If it's a SELECT, count rows in the model
-                    msg = f"Success. Rows returned: {self.query_model.rowCount()}"
-                    self.info_output.setHtml(f"<span style='font-size: 10pt;color: #2e7d32;'>[{self.counter}] {msg}</span>" + self.info_output.toHtml())
-                    #self.info_output.setText(msg + "\n" + self.info_output.toPlainText())
-                    #self.info_output.setStyleSheet("background: #fdfdfd; color: #2e7d32;") # Green for success
+                    self.insert_result(f"Success. Rows returned: {self.query_model.rowCount()}", color=Qt.darkGreen)
+
                     self.refresh_table_list()
                     if pd is not None:
                         pd.close()
@@ -193,9 +350,7 @@ class MiniSqlApp(QWidget):
                     pd.show()
                     QTimer.singleShot(100, lambda : delayed(pd))
         else:
-            self.info_output.setHtml(f"<span style='font-size: 10pt;color: #d32f2f;'>[{self.counter}] " + query.lastError().text() + "</span>" + self.info_output.toHtml())
-            #self.info_output.setText(f"[{self.counter}] " + query.lastError().text()  + "\n" + self.info_output.toPlainText())
-            #self.info_output.setStyleSheet("background: #fdfdfd; color: #d32f2f;") # Red for error
+            self.insert_result(query.lastError().text(), color=Qt.red)
 
     def refresh_table_list(self):
         current = self.table_selector.currentText()
@@ -227,19 +382,22 @@ class MiniSqlApp(QWidget):
         # Open new DB
         self.db = QSqlDatabase.addDatabase("QSQLITE")
         self.db.setDatabaseName(db_path)
-        self.counter +=1
         if not self.db.open():
-            #self.info_output.setText(f"[{self.counter}] Failed to open: {db_path}\n" + self.info_output.toPlainText())
-            self.info_output.setHtml(f"<span style='font-size: 10pt;color: #d32f2f;'>[{self.counter}] Failed to open: {db_path}</span>" + self.info_output.toHtml())
-            #self.info_output.setStyleSheet("background: #fdfdfd; color: #d32f2f;")
+            self.insert_result(f"Failed to open {db_path}: {self.db.lastError().text()}", color=Qt.red)
             return False
 
+        self.insert_result(f"Opened database: {db_path}", color=Qt.darkGreen)
         self.setWindowTitle(f"Minimal SQLite Browser - {db_path}")
+        new_words = []
+        for table in self.db.tables():
+            new_words.append(table)
+            for i in range(self.db.record(table).count()):
+                new_words.append(self.db.record(table).fieldName(i))
+
+        self.highlighter.reset()
+        self.highlighter.add_keywords(new_words, Qt.darkGreen)
+        self.query_input.set_db_keywords(new_words)
         self.refresh_table_list()
-        #self.info_output.setText(f"[{self.counter}] Opened: {db_path}\n" + self.info_output.toPlainText())
-        # use html to allow multiline green/red messages without needing to reset the whole text each time
-        self.info_output.setHtml(f"<span style='font-size: 10pt;color: #2e7d32;'>[{self.counter}] Opened: {db_path}</span>" + self.info_output.toHtml())
-        #self.info_output.setStyleSheet("background: #fdfdfd; color: #2e7d32;")
         self._start_watching(db_path)
         QTimer.singleShot(50, self.refresh_full_view)
 
@@ -269,13 +427,8 @@ class MiniSqlApp(QWidget):
         font = QFont("Monospace")
         font.setStyleHint(QFont.TypeWriter)
         font.setPixelSize(font_size)
-        text = self.info_output.toHtml()
-        self.info_output.setText("")  # Clear to avoid font reset when setting HTML
         for f in self.fontable:
             f.setFont(font)
-        font_size = int(font_size * 72/96)
-        modified_html = re.sub(r"font-size:\s*\d+pt;", f"font-size:{font_size}pt;", text)
-        self.info_output.setHtml(modified_html)  # Restore text with new font
         self.query_view.resizeColumnsToContents()
         self.full_view.resizeColumnsToContents()
 
