@@ -162,11 +162,10 @@ class MiniSqlApp(QWidget):
     focus_in = pyqtSignal(object)
     _db_changed = pyqtSignal()  # internal signal, fired from watchdog thread
 
-    def __init__(self):
+    def __init__(self, path=None):
         super().__init__()
         self.state = 0
         self.counter = 0
-
 
         # Global Font 12pt
         #self.setFont(QFont("Segoe UI", 18))
@@ -252,6 +251,8 @@ class MiniSqlApp(QWidget):
                          self.query_view, op_info, query_res, table_w_lbl]
 
         self.set_font_size(14)
+        if path:
+            self.open_database(path)
 
     def loop_views(self):
         self.state = (self.state + 1) % 4
